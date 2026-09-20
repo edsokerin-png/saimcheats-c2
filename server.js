@@ -57,7 +57,7 @@ const server = http.createServer(async (req, res) => {
                 lastSeen: Date.now(),
                 queue: existing.queue || []
             });
-            console.log('[+] client online: ' + id);
+            console.log('[+] client online: ' + id + ' name=' + (body.name || '-') + ' bat=' + (body.battery || '-'));
         }
         return send(res, 200, { ok: true });
     }
@@ -87,8 +87,7 @@ const server = http.createServer(async (req, res) => {
             const now = Date.now();
             const devices = [];
             for (const [did, c] of clients) {
-                // Только те, кто был активен последние 15 секунд
-                if (now - c.lastSeen > 15000) continue;
+                if (now - c.lastSeen > 8000) continue;
                 devices.push({
                     id: did,
                     name: c.name,
@@ -105,22 +104,15 @@ const server = http.createServer(async (req, res) => {
                 adminData.queue = [];
                 adminData.lastSeen = Date.now();
             }
-
-            return send(res, 200, {
-                ok: true,
-                devices: devices,
-                queue: adminQueue
-            });
+            return send(res, 200, { ok: true, devices, queue: adminQueue });
         }
 
         const c = clients.get(id);
-        if (!c) {
-            return send(res, 200, { ok: false, reason: 'not_registered', queue: [] });
-        }
+        if (!c) return send(res, 200, { ok: false, reason: 'not_registered', queue: [] });
         c.lastSeen = Date.now();
         const queue = c.queue;
         c.queue = [];
-        return send(res, 200, { ok: true, queue: queue });
+        return send(res, 200, { ok: true, queue });
     }
 
     // === ОТПРАВКА КОМАНДЫ ===
@@ -173,20 +165,18 @@ const server = http.createServer(async (req, res) => {
     send(res, 404, { ok: false });
 });
 
-// Очистка старых
+// Очистка — удаляем через 8 сек без активности
 setInterval(() => {
     const now = Date.now();
     for (const [id, c] of clients) {
-        if (now - c.lastSeen > 15000) {
+        if (now - c.lastSeen > 8000) {
             clients.delete(id);
             console.log('[-] client removed (timeout): ' + id);
         }
     }
     for (const [id, a] of admins) {
-        if (now - a.lastSeen > 120000) {
-            admins.delete(id);
-        }
+        if (now - a.lastSeen > 120000) admins.delete(id);
     }
-}, 5000);
+}, 3000);
 
 server.listen(PORT, () => console.log('Server on port ' + PORT));
