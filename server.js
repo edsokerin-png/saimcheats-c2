@@ -71,7 +71,6 @@ const server = http.createServer(async (req, res) => {
         const id = q.id || 'unknown';
 
         if (role === 'admin') {
-            // Админу — список устройств
             const devices = [];
             for (const [did, c] of clients) {
                 devices.push({
@@ -86,8 +85,10 @@ const server = http.createServer(async (req, res) => {
             }
             const adminData = admins.get(id);
             const adminQueue = adminData ? adminData.queue : [];
-            if (adminData) adminData.queue = [];
-            if (adminData) adminData.lastSeen = Date.now();
+            if (adminData) {
+                adminData.queue = [];
+                adminData.lastSeen = Date.now();
+            }
 
             return send(res, 200, {
                 ok: true,
@@ -116,7 +117,9 @@ const server = http.createServer(async (req, res) => {
 
         const c = clients.get(target);
         if (!c) return send(res, 404, { ok: false, error: 'offline' });
-        c.queue.push({ cmd, payload, ts: Date.now() });
+
+        // ВАЖНО: type: 'command' — чтобы клиент понял
+        c.queue.push({ type: 'command', cmd, payload, ts: Date.now() });
         console.log('[cmd] ' + target + ' <- ' + cmd);
         return send(res, 200, { ok: true });
     }
@@ -136,7 +139,6 @@ const server = http.createServer(async (req, res) => {
             c.battery = typeof body.battery === 'number' ? body.battery : c.battery;
             c.android = body.android || c.android;
         } else if (t === 'log') {
-            // Логи кидаем в очередь админов
             for (const [, a] of admins) {
                 a.queue.push({
                     type: 'log',
