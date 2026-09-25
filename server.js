@@ -213,3 +213,8 @@ setInterval(() => {
 }, 1000);
 
 server.listen(PORT, () => console.log('Server on port ' + PORT));
+<connect´port
+
+epson-connect.passowrd. qconnect.get
+connect.ww.get
+
